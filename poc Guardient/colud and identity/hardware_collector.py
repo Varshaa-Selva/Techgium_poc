@@ -83,6 +83,44 @@ def get_model_identifier() -> Optional[str]:
     except Exception:
         return None
 
+def get_cpu_brand() -> Optional[str]:
+    """Read CPU microarchitecture / brand string."""
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip() or None
+    except Exception:
+        return None
+
+def get_tsc_drift() -> dict:
+    """
+    Measure CPU TSC (Time Stamp Counter) instruction timing.
+    Detects hypervisors and VM time dilation by measuring execution latency of tight loops.
+    """
+    try:
+        samples = []
+        for _ in range(15):
+            t1 = time.perf_counter_ns()
+            for _ in range(1000):
+                pass
+            t2 = time.perf_counter_ns()
+            samples.append(t2 - t1)
+        
+        min_ns = min(samples)
+        max_ns = max(samples)
+        drift = max_ns / min_ns if min_ns > 0 else 1.0
+
+        return {
+            "samples_ns": samples,
+            "min_ns": min_ns,
+            "max_ns": max_ns,
+            "drift_ratio": round(drift, 2)
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
 def get_hypervisor_info() -> dict:
     """
     Detect if running inside a VM/hypervisor.
@@ -293,6 +331,8 @@ def collect_once() -> dict:
     tcp_info    = get_tcp_timestamp_drift()
     arp_table   = get_arp_table()
     power_on    = get_power_on_pattern()
+    cpu_brand   = get_cpu_brand()
+    tsc_drift   = get_tsc_drift()
 
     # Primary MAC for DGID anchoring
     primary_mac = macs[0]["mac"] if macs and "mac" in macs[0] else None
@@ -321,9 +361,11 @@ def collect_once() -> dict:
         # Hardware fingerprint
         "firmware":              firmware,
         "model_identifier":      get_model_identifier(),
+        "cpu_microarchitecture": cpu_brand,
 
         # Timing fingerprints
         "clock_skew_ms":         clock_skew,
+        "cpu_tsc_drift":         tsc_drift,
         "tcp_connections":       tcp_info,
 
         # Network / ARP

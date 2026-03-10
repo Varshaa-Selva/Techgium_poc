@@ -60,11 +60,13 @@ class EnrichmentService(BaseConsumer):
         # 1. Geo & ASN Enrichment
         geo = geo_lookup(dest_ip)
         event["geo_destination"] = geo.get("country")
-        event["asn"] = geo.get("asn")
         event["destination_asn"] = geo.get("asn") # required by feature engine
         
         # 2. DNS & MAC Enrichment
-        event["dns_reverse"] = reverse_dns(dest_ip)
+        try:
+            event["dns_reverse"] = reverse_dns(dest_ip)
+        except Exception:
+            event["dns_reverse"] = None
         event["mac_vendor"] = mac_vendor(mac)
         
         # 3. Device Classification
@@ -75,7 +77,7 @@ class EnrichmentService(BaseConsumer):
         recv = event.get("bytes_received") or 0
         event["bytes_total"] = sent + recv
         
-        event["login_failure_flag"] = 1 if event.get("login_success") is False else 0
+        event["login_failure_flag"] = int(event.get("login_success") is False)
         event["after_hours"] = after_hours(event.get("timestamp", ""))
 
         # Kafka
@@ -90,7 +92,7 @@ class EnrichmentService(BaseConsumer):
                 os=event.get("os"),
                 device_type=event["device_class"],
                 hostname=event.get("hostname"),
-                enrichment={"geo": event["geo_destination"], "asn": event["asn"]},
+                enrichment={"geo": event["geo_destination"], "asn": event.get("destination_asn")},
                 timestamp=event.get("timestamp") or datetime.utcnow().isoformat()
             )
             # Full audit log

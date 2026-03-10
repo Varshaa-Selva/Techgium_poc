@@ -18,8 +18,9 @@ def _get_producer() -> KafkaProducer:
         _producer = KafkaProducer(
             bootstrap_servers=BOOTSTRAP,
             value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
-            acks="all",
+            acks=1,
             retries=3,
+            request_timeout_ms=5000,
         )
     return _producer
 

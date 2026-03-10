@@ -15,7 +15,8 @@ CANONICAL_FIELDS = [
     "dns_query", "tls_sni", "bytes_sent", "bytes_received",
     "user_id", "login_success", "auth_type", "mfa_status",
     "mac_address", "hostname", "os", "device_type",
-    "api_call", "resource", "region", "hardware_fingerprint", "raw"
+    "api_call", "resource", "region", "hardware_fingerprint",
+    "interface", "raw"
 ]
 
 
@@ -38,7 +39,12 @@ def events_from_network(payload: dict) -> list[dict]:
     events = []
     for flow in payload.get("flows", []):
         src_ip = flow.get("source_ip")
-        ev_type = "dns_query" if flow.get("dns_query_name") else "network_flow"
+        
+        # network_data.py sends lists: dns_query_names: [...]
+        queries = flow.get("dns_query_names") or []
+        first_query = queries[0] if queries else None
+        
+        ev_type = "dns_query" if first_query else "network_flow"
         
         events.append(make_event({
             "collector": "network",
@@ -48,11 +54,13 @@ def events_from_network(payload: dict) -> list[dict]:
             "destination_ip": flow.get("destination_ip"),
             "source_port": flow.get("source_port"),
             "destination_port": flow.get("destination_port"),
-            "dns_query": flow.get("dns_query_name"),
+            "dns_query": first_query,
             "tls_sni": flow.get("tls_sni"),
             "bytes_sent": flow.get("bytes_sent", 0),
             "bytes_received": flow.get("bytes_received", 0),
             "mac_address": flow.get("mac_address"),
+            "hostname": flow.get("hostname"),
+            "interface": flow.get("interface"),
             "raw": flow
         }))
     return events
@@ -71,6 +79,9 @@ def events_from_identity(payload: dict) -> list[dict]:
             "auth_type": ev.get("authentication_type"),
             "mfa_status": ev.get("mfa_status"),
             "source_ip": ev.get("login_source_ip"),
+            "mac_address": ev.get("mac_address"),
+            "hostname": ev.get("hostname"),
+            "device_type": ev.get("device_type"),
             "raw": ev
         }))
     return events
@@ -88,6 +99,7 @@ def events_from_cloud(payload: dict) -> list[dict]:
                 "source_ip": audit_ev.get("api_source_ip"),
                 "api_call": audit_ev.get("method"),
                 "resource": audit_ev.get("instance_id") or snapshot.get("project_id"),
+                "hostname": audit_ev.get("instance_id"),
                 "region": audit_ev.get("region"),
                 "raw": audit_ev
             }))
@@ -95,9 +107,21 @@ def events_from_cloud(payload: dict) -> list[dict]:
 
 
 def events_from_hardware(payload: dict) -> list[dict]:
-    mac = payload.get("mac_addresses", [{}])
-    mac_addr = mac[0].get("address") if mac else None
-    ip_addr = mac[0].get("ip") if mac else None
+    # Support multiple formats for MAC addresses
+    mac_addr = payload.get("mac_address")
+    if not mac_addr:
+        macs = payload.get("mac_addresses") or payload.get("all_mac_addresses") or []
+        if macs and isinstance(macs, list) and len(macs) > 0:
+            m0 = macs[0]
+            mac_addr = m0.get("address") or m0.get("mac")
+
+    ip_addr = payload.get("ip_address") or payload.get("source_ip")
+    if not ip_addr and "mac_addresses" in payload:
+        macs = payload.get("mac_addresses")
+        if macs and isinstance(macs, list) and len(macs) > 0:
+            ip_addr = macs[0].get("ip")
+    
+    os_name = payload.get("os", {}).get("name") if isinstance(payload.get("os"), dict) else payload.get("os")
     
     return [make_event({
         "collector": "hardware",
@@ -106,8 +130,8 @@ def events_from_hardware(payload: dict) -> list[dict]:
         "source_ip": ip_addr,
         "mac_address": mac_addr,
         "hostname": payload.get("hostname"),
-        "os": payload.get("os", {}).get("name"),
-        "device_type": "laptop" if "macOS" in payload.get("os", {}).get("name", "") else "unknown",
-        "hardware_fingerprint": payload.get("machine_id"),
+        "os": os_name,
+        "device_type": "laptop" if os_name and "macOS" in os_name else "unknown",
+        "hardware_fingerprint": payload.get("machine_id") or payload.get("hardware_uuid") or payload.get("vm_uuid"),
         "raw": payload
     })]

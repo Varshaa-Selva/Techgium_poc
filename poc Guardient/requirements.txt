@@ -22,3 +22,6 @@ google-auth>=2.48.0
 
 # ── Network Collector ─────────────────────────────────────
 scapy>=2.6.0
+twilio>=8.0.0
+python-dotenv>=1.0.0
+secure-smtplib

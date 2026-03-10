@@ -28,7 +28,7 @@ class BaseConsumer:
             bootstrap_servers=BOOTSTRAP,
             group_id=self.group_id,
             value_deserializer=lambda x: json.loads(x.decode("utf-8")),
-            auto_offset_reset="latest",
+            auto_offset_reset="earliest",
             enable_auto_commit=True,
         )
         signal.signal(signal.SIGINT,  self._shutdown)

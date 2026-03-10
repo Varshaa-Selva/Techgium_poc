@@ -14,7 +14,8 @@ import {
   Activity,
   BookOpen,
   Database,
-  Brain
+  Brain,
+  Target
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -33,6 +34,7 @@ const navItems = [
   { name: 'Adaptive Trust', href: '/adaptive-trust', icon: Brain },
   { name: 'Data Transparency', href: '/data-transparency', icon: Database },
   { name: 'Reports', href: '/reports', icon: FileText },
+  { name: 'Simulation Engine', href: '/simulation', icon: Target },
   { name: 'How It Works', href: '/how-it-works', icon: BookOpen },
 ];
 

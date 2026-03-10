@@ -520,14 +520,17 @@ browser (localhost:3000)
 
 ---
 
-### `services/decision_engine.py`
-**Role:** Stage 6 — Action and alerting from trust scores.
+### `services/decision_engine.py` (Stage 6 — Action & Alerting)
 
-- Extends `BaseConsumer`, consumes `trust_scores`
-- `decide_action(trust, device_role)`: 5-tier graduated response
-- Always emits a `security_actions` event (even for allowed devices — enforcement layer consumes this)
-- Fires `alerts` event + writes to `alerts` table only when `trust ≤ 40 AND risk > 0`
-- Fetches latest risk score from DB for alert enrichment (cross-topic join)
+- **Role:** Maps numerical trust scores to graduated action tiers.
+- Emits `security_actions` event (always).
+- Emits `alerts` event (only when trust ≤ 40).
+
+### `services/response_engine.py` (Stage 7 — Containment Enforcer)
+
+- **Role:** Consumes `security_actions` and simulates SOAR (Security Orchestration, Automation, and Response) enforcement.
+- Writes physical execution records to `response_actions` DB table.
+- **SMTP SOC Alerting:** Triggers a real-time email alert via `utils/email_alert.py` (secure-smtplib on smtp.gmail.com:587) when a device's trust score drops `< 30`. Relies on `SMTP_USER` and `SMTP_PASS` environment variables and incorporates a 5-minute cooldown cache to prevent email fatigue.
 
 ---
 
@@ -562,30 +565,36 @@ browser (localhost:3000)
 ## How to Run
 
 ```bash
-# 1. Start infrastructure
+# 1. Export SMTP credentials for real-time alerting
+export SMTP_USER="your_email@gmail.com"
+export SMTP_PASS="your_app_password"
+
+# 2. Start infrastructure
 docker-compose up -d        # Kafka + PostgreSQL
 
-# 2. Initialise Kafka topics
+# 3. Initialise Kafka topics
 python3 -m pipeline.topics
 
-# 3. Initialise DB schema
+# 4. Initialise DB schema
 python3 -m db.db
 
-# 4. Start the API  (serves telemetry ingestion + /api/v1 frontend endpoints)
+# 5. Start the API  (serves telemetry ingestion + /api/v1 frontend endpoints)
 python3 -m uvicorn api.main:app --port 8000 --reload
 
-# 5. Start each pipeline service in a separate terminal
+# 6. Start each pipeline service in a separate terminal
 python3 services/enrichment_service.py
 python3 services/feature_engine.py
 python3 services/ml_monitor.py
 python3 services/risk_engine.py
 python3 services/trust_engine.py
 python3 services/decision_engine.py
+python3 services/response_engine.py
+python3 services/simulation_controller.py
 
 # Or use the startup script
 bash start.sh
 
-# 6. Start the Next.js SOC dashboard
+# 7. Start the Next.js SOC dashboard
 cd "techgium frontend"
 npm run dev            # → http://localhost:3000
 

@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from pipeline.producer import publish_event
 from pipeline.consumer import BaseConsumer
-from pipeline.topics  import RISK_SCORES, TRUST_SCORES
+from pipeline.topics  import GRAPH_SCORES, TRUST_SCORES
 from db.db import insert_trust_score, load_trust_state, save_trust_state, init_schema
 
 # ──────────────────────────────────────────────────────────────
@@ -231,14 +231,18 @@ def compute_AR(state: dict) -> float:
             WEIGHTS["N"] * float(state["N"]))
 
 
-def compute_CAF(state: dict) -> float:
-    """CAF = 1 + α·(Σ(I,C,V,N) − max(I,C,V,N))
-    Rises when multiple categories are active simultaneously.
+def compute_CAF(state: dict, graph_caf: float = 1.0) -> float:
+    """CAF = max( 1 + α·(Σ(I,C,V,N) − max(I,C,V,N)),  graph_caf )
+
+    The graph_caf override (from the Graph Correlator) reflects lateral
+    movement chain length: CAF_graph = 1 + 0.3 × path_length.
+    We take the maximum so a confirmed attack chain always wins.
     """
     I, C, V, N = (float(state["I"]), float(state["C"]),
                   float(state["V"]), float(state["N"]))
     active = I + C + V + N
-    return 1.0 + ALPHA * (active - max(I, C, V, N))
+    local_caf = 1.0 + ALPHA * (active - max(I, C, V, N))
+    return max(local_caf, graph_caf)
 
 
 def compute_CI(confidences: list[float]) -> float:
@@ -290,10 +294,12 @@ def apply_override(trust: float, compromised: bool) -> float:
 # ──────────────────────────────────────────────────────────────
 
 def trust_pipeline(state: dict, events: list[dict],
-                    now_ts: float, device_type: str) -> tuple[float, float, dict]:
+                    now_ts: float, device_type: str,
+                    graph_caf: float = 1.0) -> tuple[float, float, dict]:
     """
     Run all 9 steps for a batch of events arriving at time now_ts.
-    Returns (trust_score, adjusted_risk, updated_state).
+    graph_caf is supplied by the Graph Correlator when a lateral-movement
+    chain has been detected.  Returns (trust_score, adjusted_risk, updated_state).
     """
     last_ts = float(state.get("last_timestamp", 0.0))
     dt = max(0.0, now_ts - last_ts)
@@ -315,8 +321,8 @@ def trust_pipeline(state: dict, events: list[dict],
     # Step 2
     AR = compute_AR(state)
 
-    # Step 3
-    CAF = compute_CAF(state)
+    # Step 3 — use graph_caf if the Graph Correlator detected a chain
+    CAF = compute_CAF(state, graph_caf)
 
     # Step 4
     CI = compute_CI(confidences)
@@ -349,7 +355,7 @@ def trust_pipeline(state: dict, events: list[dict],
 # ──────────────────────────────────────────────────────────────
 
 class TrustEngine(BaseConsumer):
-    topic        = RISK_SCORES
+    topic        = GRAPH_SCORES   # Now reads from Graph Correlator output
     group_id     = "trust-engine-v2"
     service_name = "TrustEngine"
 
@@ -378,9 +384,10 @@ class TrustEngine(BaseConsumer):
         state = load_trust_state(device_id)
         now_ts = time.time()
 
-        # Run the 9-step pipeline
+        # Run the 9-step pipeline with graph_caf from Graph Correlator
+        graph_caf = float(event.get("graph_caf", 1.0))
         trust, adj, updated_state = trust_pipeline(
-            state, [contrib], now_ts, device_type
+            state, [contrib], now_ts, device_type, graph_caf
         )
 
         # Persist updated state
@@ -408,7 +415,9 @@ class TrustEngine(BaseConsumer):
             "state_V":        round(updated_state["V"], 4),
             "state_N":        round(updated_state["N"], 4),
             "AR":             round(compute_AR(updated_state), 4),
-            "CAF":            round(compute_CAF(updated_state), 4),
+            "CAF":            round(compute_CAF(updated_state, graph_caf), 4),
+            "graph_caf":      graph_caf,
+            "attack_path":    event.get("attack_path", []),
             "trust_reasons": event.get("anomaly_reasons", []),
         }
 

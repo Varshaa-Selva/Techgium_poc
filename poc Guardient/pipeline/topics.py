@@ -16,9 +16,13 @@ ENRICHED_EVENTS  = "enriched_events"   # enrichment service out
 FEATURE_STREAM   = "feature_stream"    # feature engine out
 ML_SCORES        = "ml_scores"         # ml_monitor out
 RISK_SCORES      = "risk_scores"       # risk_engine out
+GRAPH_SCORES     = "graph_scores"      # graph_correlator out  (NEW)
 TRUST_SCORES     = "trust_scores"      # trust_engine out
 ALERTS           = "alerts"            # decision_engine alerts
 SECURITY_ACTIONS = "security_actions"  # decision_engine enforcement actions
+FEEDBACK_EVENTS  = "feedback_events"   # feedback_service out  (NEW)
+SIMULATION_EVENTS= "simulation_events" # sandbox_executor out
+RESPONSE_ACTIONS = "response_actions"  # response_engine out
 
 ALL_TOPICS = [
     RAW_EVENTS,
@@ -26,9 +30,13 @@ ALL_TOPICS = [
     FEATURE_STREAM,
     ML_SCORES,
     RISK_SCORES,
+    GRAPH_SCORES,
     TRUST_SCORES,
     ALERTS,
     SECURITY_ACTIONS,
+    FEEDBACK_EVENTS,
+    SIMULATION_EVENTS,
+    RESPONSE_ACTIONS,
 ]
 
 

@@ -19,7 +19,7 @@ const fetcher = async (url: string) => {
  *   status       — 'online' | 'offline' depending on last fetch result
  *   mutate       — SWR mutate function to force a re-fetch
  */
-export const usePolling = <T,>(url: string, refreshInterval = 3000, config?: any) => {
+export const usePolling = <T,>(url: string | null, refreshInterval = 3000, config?: any) => {
   const { data, error, isLoading, mutate } = useSWR<T>(url, fetcher, {
     refreshInterval,
     revalidateOnFocus: false,

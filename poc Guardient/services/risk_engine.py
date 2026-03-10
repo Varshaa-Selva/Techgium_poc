@@ -19,6 +19,8 @@ can correctly route it into the right state bucket:
 from __future__ import annotations
 import math
 import sys
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -28,6 +30,26 @@ from pipeline.producer import publish_event
 from pipeline.consumer import BaseConsumer
 from pipeline.topics  import ML_SCORES, RISK_SCORES
 from db.db import insert_risk_score
+from services.feedback_service import get_cached_weight, refresh_cache
+
+
+# ── Feedback weight cache refresh ────────────────────────────────────────────
+# Loads feedback weights from PostgreSQL at startup and every REFRESH_INTERVAL
+# seconds in a background daemon thread.
+REFRESH_INTERVAL = 300   # 5 minutes
+
+def _start_weight_refresh():
+    def _loop():
+        while True:
+            try:
+                refresh_cache()
+            except Exception as exc:
+                print(f"[Risk] weight refresh error: {exc}")
+            time.sleep(REFRESH_INTERVAL)
+    t = threading.Thread(target=_loop, daemon=True, name="risk-weight-refresh")
+    t.start()
+
+_start_weight_refresh()  # Fire immediately on import
 
 
 # ── Detection type → Risk Category ─────────────────────────────
@@ -185,7 +207,10 @@ def compute_risk(
     detection = _parse_detection(anomaly_reasons)
 
     # 2. Severity — detection-specific first, source fallback
-    severity = SEVERITY_TABLE.get(detection) or SOURCE_SEVERITY.get(source, 0.70)
+    #    Apply learned feedback weight: Severity_new = Severity_old × feedback_weight
+    base_severity    = SEVERITY_TABLE.get(detection) or SOURCE_SEVERITY.get(source, 0.70)
+    feedback_weight  = get_cached_weight(detection)
+    severity         = min(1.0, base_severity * feedback_weight)
 
     # 3. Category from detection (I / C / V / N)
     category = DETECTION_CATEGORY.get(detection) or {
@@ -218,7 +243,8 @@ class RiskEngine(BaseConsumer):
 
     def process(self, event: dict):
         anomaly          = float(event.get("anomaly_score", 0.0))
-        source           = event.get("source") or event.get("collector", "network")
+        meta             = event.get("metadata", {})
+        source           = meta.get("collector") or event.get("source", "network")
         features         = event.get("features", {})
         anomaly_reasons  = event.get("anomaly_reasons", [])
         device_type      = (
@@ -240,8 +266,8 @@ class RiskEngine(BaseConsumer):
             "timestamp":        event.get("timestamp"),
             "source":           source,
             "device_id":        event.get("device_id"),
-            "ip":               event.get("ip"),
-            "event_type":       event.get("event_type"),
+            "ip":               meta.get("ip"),
+            "event_type":       meta.get("event_type"),
             "device_type":      device_type,
             "device_role":      role,
             "enrichment":       event.get("enrichment", {}),

@@ -9,10 +9,11 @@ from scapy.layers.tls.handshake import TLSClientHello
 from scapy.layers.tls.extensions import TLS_Ext_ServerName
 import geoip2.database
 from dotenv import load_dotenv
+import socket
 
 load_dotenv()
 
-# ==============================
+LOCAL_HOSTNAME = socket.gethostname()
 # JSON-safe serialiser
 # Converts any bytes values to hex strings so requests.post never fails
 # ==============================
@@ -141,7 +142,7 @@ def _flow_key(src, sport, dst, dport, proto):
 def _rev_key(src, sport, dst, dport, proto):
     return (dst, dport, src, sport, proto)
 
-def packet_callback(packet):
+def packet_callback(packet, iface="unknown"):
     if not packet.haslayer(IP):
         return
 
@@ -181,6 +182,7 @@ def packet_callback(packet):
                 "tls_sni":         None,
                 "ja3":             None,
                 "mac":             None,
+                "interface":       iface,
             }
 
         flow = flows[key]
@@ -234,21 +236,29 @@ def packet_callback(packet):
                 flow["ja3"] = compute_ja3(packet)
 
         # MAC address & per-device aggregation
-        mac = packet[Ether].src if packet.haslayer(Ether) else None
+        src_mac = packet[Ether].src if packet.haslayer(Ether) else None
+        dst_mac = packet[Ether].dst if packet.haslayer(Ether) else None
+
         if is_local_ip(src):
             dev = device_stats[src]
-            if mac and not dev["mac_address"]:
-                dev["mac_address"] = mac
-            if mac and not flow["mac"]:
-                flow["mac"] = mac
+            if src_mac and not dev["mac_address"]:
+                dev["mac_address"] = src_mac
+            if src_mac and not flow["mac"]:
+                flow["mac"] = src_mac
             dev["bytes_sent"]         += size
             dev["packets"]            += 1
             dev["last_seen"]           = time.time()
             dev["protocols"][proto]   += 1
             dev["ports"][dport]       += 1
             dev["destinations"][dst]  += 1
+
         if is_local_ip(dst):
-            device_stats[dst]["bytes_received"] += size
+            dev = device_stats[dst]
+            # Track per-device stats but do NOT set flow["mac"] to dst_mac
+            # — flow["mac"] must represent the source/initiator's MAC only
+            if dst_mac and not dev["mac_address"]:
+                dev["mac_address"] = dst_mac
+            dev["bytes_received"] += size
 
 # ==============================
 # Aggregator — pushes every 3s
@@ -276,6 +286,12 @@ def aggregator():
                 first_seen = dev.get("first_seen", flow["start_time"])
                 last_seen  = dev.get("last_seen",  flow["last_seen"])
 
+                # Only tag hostname if this src_ip is a locally-sending interface
+                # (tracked in device_stats). This prevents remote IPs getting the
+                # local hostname and merging into the MacBook's DGID.
+                is_local_src = src_ip in device_stats
+                host = LOCAL_HOSTNAME if is_local_src else None
+
                 flows_payload.append({
                     "source_ip":        src_ip,
                     "destination_ip":   dst_ip,
@@ -289,13 +305,16 @@ def aggregator():
                     "tcp_flags":        {str(k): v for k, v in dict(flow["tcp_flags"]).items()},
                     "tls_sni":          flow["tls_sni"],
                     "ja3":              flow["ja3"],
-                    "dns_query_name":   flow["dns_queries"][-1] if flow["dns_queries"] else None,
+                    "dns_query_names":  flow["dns_queries"],
                     "dns_response_ip":  flow["dns_response_ip"],
                     "geoip":            get_geoip(dst_ip),
                     "asn":              get_asn(dst_ip),
                     "mac_address":      flow["mac"],
                     "first_seen":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(first_seen)),
                     "last_seen":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_seen)),
+                    "flow_direction":   "outbound" if is_local_src else "inbound",
+                    "interface":        flow["interface"],
+                    "hostname":         host,
                 })
 
         if not flows_payload:
@@ -322,7 +341,7 @@ def _start_sniffer_on_iface(iface: str):
     def _sniff():
         try:
             print(f"[SNIFFER] Starting on interface: {iface}")
-            sniff(iface=iface, filter="ip", prn=packet_callback, store=False)
+            sniff(iface=iface, filter="ip", prn=lambda p: packet_callback(p, iface), store=False)
         except Exception as e:
             print(f"[SNIFFER] Error on {iface}: {e}")
     threading.Thread(target=_sniff, daemon=True).start()

@@ -21,44 +21,32 @@ from pipeline.producer import publish_event
 from pipeline.consumer import BaseConsumer
 from pipeline.topics  import ENRICHED_EVENTS, FEATURE_STREAM
 from db.db import insert_features
+from services.device_profiles import compute_profile_distance, archetype_for_type
 
 
 def dns_entropy(domain: str) -> float:
+    domain = domain or ""
     if not domain:
         return 0.0
     probs = [float(domain.count(c)) / len(domain) for c in set(domain)]
     return -sum([p * math.log(p) / math.log(2.0) for p in probs])
 
 def port_risk(port) -> int:
-    risky_ports = [22, 23, 3389, 445, 4444, 6667]
+    risky_ports = {22, 23, 3389, 445, 4444, 6667}
     try:
         return 1 if int(port) in risky_ports else 0
     except (ValueError, TypeError):
         return 0
 
-def after_hours(timestamp: str) -> int:
-    if not timestamp:
-        return 0
-    try:
-        hour = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).hour
-        if hour < 6 or hour > 22:
-            return 1
-        return 0
-    except Exception:
-        return 0
+
 
 
 def extract_features(event: dict) -> dict:
     """Extract unified numerical features from any event."""
     features = {}
 
-    features["device_id"] = event.get("device_id")
-    features["timestamp"] = event.get("timestamp")
-    features["collector"] = event.get("collector", "unknown")
-    features["event_type"] = event.get("event_type", "unknown")
-    features["ip"] = event.get("source_ip", "unknown")
-
-    features["dns_entropy"] = round(dns_entropy(event.get("dns_query")), 4)
+    # Strictly numeric features for ML tracking
+    features["dns_entropy"] = round(dns_entropy(event.get("dns_query", "")), 4)
     features["bytes_total"] = float(event.get("bytes_total", 0))
     features["port_risk"] = port_risk(event.get("destination_port"))
     features["login_failure"] = int(event.get("login_failure_flag", 0))
@@ -66,10 +54,10 @@ def extract_features(event: dict) -> dict:
     # Map from the device_class string
     features["iot_device_flag"] = 1 if event.get("device_class") == "iot" else 0
     
-    features["after_hours"] = after_hours(event.get("timestamp"))
+    features["after_hours"] = event.get("after_hours", 0)
 
     # Extra features that our existing rules in ml_monitor / trust_engine rely on:
-    features["dns_query_length"] = len(event.get("dns_query", ""))
+    features["dns_query_length"] = len(event.get("dns_query") or "")
     features["session_duration"] = float(event.get("session_duration", 0))
     features["has_tls"] = 1.0 if event.get("tls_sni") else 0.0
     features["dest_port_risk"] = features["port_risk"]
@@ -106,21 +94,30 @@ class FeatureEngine(BaseConsumer):
     service_name = "FeatureEngine"
 
     def process(self, event: dict):
-        collector = event.get("collector", "unknown")
+        collector   = event.get("collector", "unknown")
+        device_type = event.get("device_class") or event.get("device_type") or "unknown"
         
         # Extract numerical features
         features = extract_features(event)
+        
+        # --- Behavioral Archetype Profiling ---
+        arch_dev  = compute_profile_distance(features, device_type)
+        archetype = archetype_for_type(device_type)
+        features["archetype_deviation"] = arch_dev
         
         # Package for downstream
         feature_event = {
             "event_id":   event.get("event_id") or str(uuid.uuid4()),
             "timestamp":  event.get("timestamp"),
-            "source":     collector,  # DB still expects mapping to 'source' col
-            "collector":  collector,
             "device_id":  event.get("device_id"),
-            "ip":         event.get("source_ip"),
-            "event_type": event.get("event_type"),
-            "enrichment": {"geo": event.get("geo_destination"), "asn": event.get("asn")},
+            "source":     collector,
+            "metadata": {
+                "collector":        collector,
+                "event_type":       event.get("event_type"),
+                "ip":               event.get("source_ip"),
+                "device_archetype": archetype,
+            },
+            "enrichment": {"geo": event.get("geo_destination"), "asn": event.get("destination_asn")},
             "features":   features,
         }
         

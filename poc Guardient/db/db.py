@@ -127,6 +127,51 @@ CREATE TABLE IF NOT EXISTS device_baselines (
     baseline        JSONB NOT NULL,
     updated_at      TIMESTAMPTZ NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS graph_correlation_events (
+    id              SERIAL PRIMARY KEY,
+    event_id        TEXT,
+    device_id       TEXT,
+    timestamp       TIMESTAMPTZ,
+    attack_path     JSONB,
+    path_length     INTEGER,
+    graph_caf       FLOAT,
+    risk_score      INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS feedback_labels (
+    id              SERIAL PRIMARY KEY,
+    alert_id        TEXT,
+    device_id       TEXT,
+    detection_type  TEXT,
+    label           TEXT,
+    analyst         TEXT,
+    timestamp       TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS feedback_weights (
+    detection_type  TEXT PRIMARY KEY,
+    weight          FLOAT NOT NULL DEFAULT 1.0,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS simulation_runs (
+    run_id          TEXT PRIMARY KEY,
+    device_id       TEXT,
+    attack_type     TEXT,
+    status          TEXT,
+    started_at      TIMESTAMPTZ,
+    ended_at        TIMESTAMPTZ,
+    parameters      JSONB
+);
+
+CREATE TABLE IF NOT EXISTS response_actions (
+    action_id       TEXT PRIMARY KEY,
+    device_id       TEXT,
+    trust_score     FLOAT,
+    action          TEXT,
+    triggered_at    TIMESTAMPTZ
+);
 """
 
 
@@ -332,6 +377,130 @@ def save_trust_state(device_id: str, state: dict):
             SET state      = EXCLUDED.state,
                 updated_at = EXCLUDED.updated_at
     """, (device_id, Json(state)))
+
+
+def insert_graph_event(event: dict):
+    """Persist a graph correlation event to PostgreSQL."""
+    execute("""
+        INSERT INTO graph_correlation_events
+            (event_id, device_id, timestamp, attack_path, path_length, graph_caf, risk_score)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (
+        event.get("event_id"),  event.get("device_id"),
+        event.get("timestamp"), Json(event.get("attack_path", [])),
+        event.get("path_length", 0),
+        event.get("graph_caf", 1.0),
+        event.get("risk_score", 0),
+    ))
+
+
+def insert_feedback_label(alert_id: str, device_id: str, detection_type: str,
+                           label: str, analyst: str):
+    """Record an analyst feedback label for an alert."""
+    execute("""
+        INSERT INTO feedback_labels (alert_id, device_id, detection_type, label, analyst)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (alert_id, device_id, detection_type, label, analyst))
+
+
+def load_feedback_weights() -> dict:
+    """Load all per-detection feedback weights. Returns {detection_type: weight}."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT detection_type, weight FROM feedback_weights")
+            rows = cur.fetchall()
+        return {r[0]: float(r[1]) for r in rows} if rows else {}
+    except Exception as exc:
+        conn.rollback()
+        print(f"[DB] load_feedback_weights error: {exc}")
+        return {}
+    finally:
+        put_conn(conn)
+
+
+def upsert_feedback_weight(detection_type: str, weight: float):
+    """Upsert the learned feedback weight for a detection type."""
+    execute("""
+        INSERT INTO feedback_weights (detection_type, weight, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (detection_type) DO UPDATE
+            SET weight     = EXCLUDED.weight,
+                updated_at = EXCLUDED.updated_at
+    """, (detection_type, weight))
+
+
+def insert_simulation_run(run_id: str, device_id: str, attack_type: str, status: str, parameters: dict):
+    execute("""
+        INSERT INTO simulation_runs (run_id, device_id, attack_type, status, started_at, parameters)
+        VALUES (%s, %s, %s, %s, NOW(), %s)
+    """, (run_id, device_id, attack_type, status, Json(parameters)))
+
+
+def update_simulation_run_status(run_id: str, status: str):
+    execute("""
+        UPDATE simulation_runs
+        SET status = %s,
+            ended_at = CASE WHEN %s IN ('completed', 'failed', 'stopped') THEN NOW() ELSE ended_at END
+        WHERE run_id = %s
+    """, (status, status, run_id))
+
+
+def get_simulation_runs() -> list:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT run_id, device_id, attack_type, status, started_at, ended_at, parameters FROM simulation_runs ORDER BY started_at DESC LIMIT 100")
+            rows = cur.fetchall()
+            return [
+                {
+                    "run_id": r[0],
+                    "device_id": r[1],
+                    "attack_type": r[2],
+                    "status": r[3],
+                    "started_at": r[4].isoformat() if r[4] else None,
+                    "ended_at": r[5].isoformat() if r[5] else None,
+                    "parameters": r[6]
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        conn.rollback()
+        print(f"[DB] get_simulation_runs error: {exc}")
+        return []
+    finally:
+        put_conn(conn)
+
+
+def insert_response_action(action_id: str, device_id: str, trust_score: float, action: str):
+    execute("""
+        INSERT INTO response_actions (action_id, device_id, trust_score, action, triggered_at)
+        VALUES (%s, %s, %s, %s, NOW())
+    """, (action_id, device_id, trust_score, action))
+
+
+def get_response_actions(limit=50) -> list:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT action_id, device_id, trust_score, action, triggered_at FROM response_actions ORDER BY triggered_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            return [
+                {
+                    "action_id": r[0],
+                    "device_id": r[1],
+                    "trust_score": r[2],
+                    "action": r[3],
+                    "triggered_at": r[4].isoformat() if r[4] else None
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        conn.rollback()
+        print(f"[DB] get_response_actions error: {exc}")
+        return []
+    finally:
+        put_conn(conn)
 
 
 if __name__ == "__main__":

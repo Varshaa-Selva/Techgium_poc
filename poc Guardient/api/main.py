@@ -85,6 +85,10 @@ def _ingest(category: str, events: list) -> dict:
         device_id = resolve_device(ev)
         ev["device_id"] = device_id
         
+        # Drop virtual-interface noise — never enters the pipeline
+        if device_id == "dev_ignored":
+            continue
+        
         if publish_event(RAW_EVENTS, ev):
             published += 1
     _save_local(category, events)

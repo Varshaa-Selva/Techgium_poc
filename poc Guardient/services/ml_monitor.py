@@ -46,7 +46,11 @@ TRACKED_METRICS = [
     "cpu_percent",
     "memory_percent",
     "dns_query_length",
+    "archetype_deviation",   # Behavioral archetype distance (NEW)
 ]
+
+ARCHETYPE_WEIGHT     = 0.4   # Blend weight for archetype deviation
+ARCHETYPE_THRESHOLD  = 1.5   # Deviation above this triggers an archetype_violation reason
 
 
 # ─── Welford online statistics ────────────────────────────
@@ -209,18 +213,29 @@ class MLMonitor(BaseConsumer):
 
     def process(self, event: dict):
         device_id = event.get("device_id") or "unknown"
-        collector = event.get("collector") or event.get("source", "unknown")
+        meta      = event.get("metadata", {})
+        collector = meta.get("collector") or event.get("source", "unknown")
         features  = event.get("features", {})
 
         anomaly_score, breakdown, reasons = process_features(device_id, features, collector)
+
+        # --- Archetype blending ---
+        # Blend archetype_deviation (computed in FeatureEngine) into anomaly score.
+        # Formula: Anomaly_final = anomaly_score + ARCHETYPE_WEIGHT × archetype_deviation
+        arch_dev = float(features.get("archetype_deviation", 0.0))
+        archetype = meta.get("device_archetype", "unknown")
+        if arch_dev > 0:
+            anomaly_score = round(anomaly_score + ARCHETYPE_WEIGHT * arch_dev, 4)
+        if arch_dev > ARCHETYPE_THRESHOLD and "archetype_violation" not in reasons:
+            reasons.append(f"archetype_violation:{archetype}:dist={arch_dev:.2f}")
 
         ml_event = {
             "event_id":          event.get("event_id") or str(uuid.uuid4()),
             "timestamp":         event.get("timestamp"),
             "source":            collector,
             "device_id":         device_id,
-            "ip":                event.get("ip"),
-            "event_type":        event.get("event_type"),
+            "ip":                meta.get("ip"),
+            "event_type":        meta.get("event_type"),
             "enrichment":        event.get("enrichment", {}),
             "features":          features,
             "anomaly_score":     anomaly_score,

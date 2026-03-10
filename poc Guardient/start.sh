@@ -64,12 +64,18 @@ open_tab "ML Monitor"           "python3 services/ml_monitor.py"
 sleep 0.5
 open_tab "Risk Engine"          "python3 services/risk_engine.py"
 sleep 0.5
+open_tab "Graph Correlator"     "python3 services/graph_correlator.py"
+sleep 0.5
 open_tab "Trust Engine"         "python3 services/trust_engine.py"
 sleep 0.5
 open_tab "Decision Engine"      "python3 services/decision_engine.py"
 sleep 0.5
+open_tab "Response Engine"      "python3 services/response_engine.py"
+sleep 0.5
+open_tab "Simulation Controller" "python3 services/simulation_controller.py"
+sleep 0.5
 
-echo "[3/7] ✅ 6 pipeline services launched in Terminal tabs"
+echo "[3/7] ✅ 9 pipeline services launched in Terminal tabs"
 echo ""
 
 # ── Network Sniffer (requires sudo) ──────────────────────
@@ -88,9 +94,11 @@ echo ""
 echo "╔══════════════════════════════════════════════════╗"
 echo "║  ALL SERVICES STARTED                            ║"
 echo "║                                                  ║"
-echo "║  • 6 pipeline services running                   ║"
+echo "║  • 9 pipeline services running                   ║"
+echo "║    (incl. Graph Correlator & Response Engine)    ║"
 echo "║  • Network sniffer active (sudo)                 ║"
-echo "║  • API already on http://localhost:8000          ║"
+echo "║  • main API running on http://localhost:8000     ║"
+echo "║  • Simulation UI running on http://localhost:8001║"
 echo "║  • Dashboard at  http://localhost:3000           ║"
 echo "║                                                  ║"
 echo "║  Data will appear in the dashboard within ~15s   ║"

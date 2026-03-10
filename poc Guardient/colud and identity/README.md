@@ -221,27 +221,82 @@ gcloud VM inventory ────→ ┘
 
 ---
 
-## Setup
+## 🚀 How to Run the Whole Project
+
+The Guardient platform consists of a backend API, Kafka streaming, microservice pipelines, a Next.js SOC frontend, and telemetry collector agents.
+
+### 1. Prerequisite Setup
 
 ```bash
-cd ~/Guardient
+# Navigate to the project root directory
+cd "/Users/kselvanarayanan/Desktop/poc Guardient"
+
+# Setup Python Virtual Environment
 python3 -m venv myenv
 source myenv/bin/activate
 pip install -r requirements.txt
+
+# Export SMTP credentials for real-time Response Engine alerts (optional)
+export SMTP_USER="your_email@gmail.com"
+export SMTP_PASS="your_app_password"
 ```
 
-### Running
+### 2. Start Infrastructure & Initialize
 
 ```bash
-# System Monitor (needs Kafka running on :9092)
-python system_monitor_kafka.py
+# Start Kafka and PostgreSQL containers in the background
+docker-compose up -d
 
-# Identity Collector (needs sudo + OpenLDAP on :389)
-sudo ./myenv/bin/python3 identity_collector.py
-
-# GCP Collector (needs gcloud auth)
-python gcp_collector.py
+# Initialize Kafka Topics & Database Schema
+python3 -m pipeline.topics
+python3 -m db.db
 ```
+
+### 3. Start Core Backend & Pipeline
+
+You need to run the ingestion API and launch the stream-processing pipelines.
+
+```bash
+# Window 1: Start the Main FastAPI server (Runs on port 8000)
+python3 -m uvicorn api.main:app --port 8000 --reload
+
+# Window 2: Launch all 7 pipeline services in the background
+# (This keeps them running persistently and logs to logs/pipeline/)
+bash run_background.sh
+
+# Window 3: Start the Network sniffer (requires sudo for packet capture)
+sudo python3 network/network_data.py
+```
+
+### 4. Start the SOC Dashboard (Frontend)
+
+```bash
+# Window 3: Start the Next.js Dashboard (Runs on port 3000)
+cd "techgium frontend"
+npm install    # If not already installed
+npm run dev
+```
+
+### 5. Run Telemetry Collectors (Agents)
+
+These agents collect **real** telemetry from your macOS system — no simulation. Run them from the project root (`poc Guardient/`):
+
+```bash
+# 🖥️ Hardware metrics (MAC address, VM UUID, ARP table, CPU burst)
+# Sends real hardware fingerprint to /hardware/profile → enriches device DGID
+python3 "colud and identity/hardware_collector.py"
+
+# 🔐 Identity Collector (real macOS auth events, SSH logins, sudo events)
+# Reads /var/log/system.log and macOS unified log — no OpenLDAP required
+python3 "colud and identity/identity/identity_collector.py"
+
+# ☁️ GCP Cloud Collector (requires active gcloud auth login)
+# Read-only: pulls Cloud Audit Logs, IAM, firewall rules etc.
+# Run: gcloud auth application-default login  (once, before starting)
+python3 "colud and identity/cloud/gcp_collector.py"
+```
+
+> **Note:** The `hardware_collector.py` is the most useful to run first — it sends your Mac's hostname, MAC addresses, and machine ID to the Device Resolver, ensuring all network interfaces are correctly clustered into a single DGID.
 
 ---
 

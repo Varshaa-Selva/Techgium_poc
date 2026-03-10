@@ -25,7 +25,7 @@ from pydantic import BaseModel
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from db.db import get_conn, put_conn
+from db.db import get_conn, put_conn, get_simulation_runs, get_response_actions
 
 router = APIRouter()
 
@@ -33,6 +33,89 @@ router = APIRouter()
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
+
+import json
+import math
+import time
+
+# ─────────────────────────────────────────────
+# Trust Decay Constants (Mirrors services/trust_engine.py)
+# ─────────────────────────────────────────────
+K_DECAY = 2.5
+ALPHA_CAF = 0.6
+WEIGHTS = {"I": 0.40, "C": 0.25, "V": 0.20, "N": 0.15}
+BASE_LAMBDA = 0.002
+
+DEVICE_DECAY_FACTORS = {
+    "server": 0.4, "domain_controller": 0.3, "network_device": 0.5,
+    "laptop": 1.0, "workstation": 1.0, "phone": 1.2, "iot": 0.7,
+    "unknown": 1.0
+}
+
+def _apply_read_time_decay(state: dict | str, device_type: str) -> tuple[float, float, dict]:
+    """
+    Applies mathematical decay to the I/C/V/N risk states based on time elapsed.
+    Returns (decayed_trust, decayed_adj_risk, updated_state_dict).
+    """
+    if not state:
+        return 80.0, 0.0, {"I": 0, "C": 0, "V": 0, "N": 0}
+
+    # Handle Postgres JSONB potentially coming back as string or dict
+    if isinstance(state, str):
+        try:
+            state = json.loads(state)
+        except:
+            return 80.0, 0.0, {"I": 0, "C": 0, "V": 0, "N": 0}
+
+    last_ts = float(state.get("last_timestamp", 0))
+    if last_ts == 0:
+        return 80.0, 0.0, state
+
+    now = time.time()
+    dt = max(0, now - last_ts)
+
+    # If dt is very small, return pre-decay values to avoid math noise
+    if dt < 1.0:
+        # Re-calc for current state
+        AR = (WEIGHTS["I"] * float(state.get("I", 0)) +
+              WEIGHTS["C"] * float(state.get("C", 0)) +
+              WEIGHTS["V"] * float(state.get("V", 0)) +
+              WEIGHTS["N"] * float(state.get("N", 0)))
+        active = sum(float(state.get(c, 0)) for c in "ICVN")
+        max_val = max(float(state.get(c, 0)) for c in "ICVN")
+        CAF = 1.0 + ALPHA_CAF * (active - max_val)
+        adj = AR * CAF
+        trust = round(100.0 * math.exp(-K_DECAY * adj), 2)
+        return trust, adj, state
+
+    d_fact = DEVICE_DECAY_FACTORS.get(str(device_type).lower(), 1.0)
+    lam = BASE_LAMBDA * d_fact
+
+    # 1. Decay each category risk
+    decayed_state = {}
+    for cat in ["I", "C", "V", "N"]:
+        val = float(state.get(cat, 0))
+        decayed_state[cat] = val * math.exp(-lam * dt)
+
+    # 2. Re-calculate AR (Aggregated Risk)
+    AR = (WEIGHTS["I"] * decayed_state["I"] +
+          WEIGHTS["C"] * decayed_state["C"] +
+          WEIGHTS["V"] * decayed_state["V"] +
+          WEIGHTS["N"] * decayed_state["N"])
+
+    # 3. Re-calculate CAF (Correlation Amplification)
+    active = sum(decayed_state.values())
+    max_val = max(decayed_state.values()) if decayed_state.values() else 0
+    CAF = 1.0 + ALPHA_CAF * (active - max_val)
+
+    # 4. Re-calculate Adjusted Risk
+    adj = AR * CAF
+
+    # 5. Re-calculate Trust Score
+    trust = round(100.0 * math.exp(-K_DECAY * adj), 2)
+
+    return trust, adj, decayed_state
+
 
 def _trust_to_decision(trust: float) -> dict:
     """Map numeric trust score to frontend decision/action fields."""
@@ -146,19 +229,28 @@ def get_entities():
 
         entities = []
         for row in rows:
-            trust  = float(row.get("trust_score") or 80)
-            adj    = float(row.get("adjusted_risk") or 0)
-            state  = row.get("trust_state") or {}
+            device_id = row["device_id"]
+            dev_type  = row.get("device_type") or "unknown"
+            state     = row.get("trust_state") or {}
+            
+            # Apply real-time decay so scores don't look static
+            decay_trust, decay_adj, decayed_state = _apply_read_time_decay(state, dev_type)
+            
+            # Use decayed values if they are fresher/lower than DB (or always use decayed for consistency)
+            # In this case, we always use decayed because state decay is a natural recovery.
+            trust  = decay_trust
+            adj    = decay_adj
+            state  = decayed_state
+            
             ts_val = row.get("score_ts") or row.get("last_seen")
             dec    = _trust_to_decision(trust)
             confidence = round(min(100, max(0, (1 - adj) * 100)), 1)
             cat_bd = _build_category_breakdown(state)
             te     = _build_trust_evaluation(
-                row["device_id"], trust, adj, state, ts_val
+                device_id, trust, adj, state, ts_val
             )
 
-            ts_str = ts_val.isoformat() if hasattr(ts_val, "isoformat") \
-                     else str(ts_val or datetime.now(timezone.utc).isoformat())
+            ts_str = datetime.now(timezone.utc).isoformat()
 
             entities.append({
                 "entity_id":         row["device_id"],
@@ -401,9 +493,13 @@ def get_entity_detail(entity_id: str):
             bl_row = cur.fetchone()
             ml_state = bl_row[0] if bl_row else None
 
+        # Re-calc latest with read-time decay
         trust  = float(row.get("trust_score") or 80)
         adj    = float(row.get("adjusted_risk") or 0)
         state  = row.get("trust_state") or {}
+        
+        trust, adj, state = _apply_read_time_decay(state, row.get("device_type") or "unknown")
+
         ts_val = row.get("score_ts") or row.get("last_seen")
         dec    = _trust_to_decision(trust)
         cat_bd = _build_category_breakdown(state)
@@ -503,3 +599,129 @@ def approve_response(payload: ApprovalRequest):
         "simulated": True,
         "timestamp": now.isoformat(),
     }
+
+
+# ─────────────────────────────────────────────
+# POST /feedback  — Adaptive Trust Feedback Loop
+# GET  /feedback/weights — Current learned weights
+# ─────────────────────────────────────────────
+
+class FeedbackRequest(BaseModel):
+    alert_id:        str
+    label:           str            # "true_attack" or "false_positive"
+    detection_type:  str
+    analyst:         Optional[str] = "soc_analyst"
+    device_id:       Optional[str] = "unknown"
+
+
+@router.post("/feedback")
+def submit_analyst_feedback(payload: FeedbackRequest):
+    """
+    Record an analyst label for a fired alert and update the severity
+    weight for the given detection_type.
+
+    Body:
+      {
+        "alert_id":       "ALERT-abc123",
+        "label":          "true_attack" | "false_positive",
+        "detection_type": "dns_entropy",
+        "analyst":        "analyst@company.com",   (optional)
+        "device_id":      "dev-xxxx"               (optional)
+      }
+
+    Response:
+      {
+        "status":         "ok",
+        "old_weight":     1.0,
+        "new_weight":     0.9,
+        "detection_type": "dns_entropy",
+        ...
+      }
+
+    Math: weight_new = weight_old × (1 + 0.2 × (label - 0.5))
+      true_attack    → ×1.10  (+10% severity)
+      false_positive → ×0.90  (-10% severity)
+    """
+    from services.feedback_service import submit_feedback
+    try:
+        result = submit_feedback(
+            alert_id       = payload.alert_id,
+            label          = payload.label,
+            detection_type = payload.detection_type,
+            analyst        = payload.analyst or "soc_analyst",
+            device_id      = payload.device_id or "unknown",
+        )
+        return result
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Feedback error: {exc}")
+
+
+@router.get("/feedback/weights")
+def get_feedback_weights():
+    """
+    Returns the current per-detection-type severity weight table.
+    Weights start at 1.0 and drift based on analyst labels.
+    weight > 1.0 = confirmed attacks of this type are more common
+    weight < 1.0 = this type triggers too many false positives
+    """
+    from services.feedback_service import get_weights_summary
+    try:
+        return get_weights_summary()
+    except Exception as exc:
+        return {"error": str(exc), "weights": {}}
+
+# ─────────────────────────────────────────────
+# GET /simulation/runs
+# ─────────────────────────────────────────────
+
+@router.get("/simulation/runs")
+def list_simulation_runs():
+    """Returns recent simulation runs."""
+    return get_simulation_runs()
+
+
+# ─────────────────────────────────────────────
+# GET /response/actions
+# ─────────────────────────────────────────────
+
+@router.get("/response/actions")
+def list_response_actions():
+    """Returns recent automated response actions."""
+    return get_response_actions()
+
+
+# ─────────────────────────────────────────────
+# GET /devices  — For the frontend dropdown
+# ─────────────────────────────────────────────
+
+@router.get("/devices")
+def get_device_list():
+    """Returns a simplified list of devices for dropdown pickers."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT device_id, hostname, device_type, last_seen
+                FROM devices
+                ORDER BY last_seen DESC
+                LIMIT 200
+            """)
+            rows = cur.fetchall()
+            return [
+                {
+                    "device_id": r[0],
+                    "hostname": r[1] or r[0],
+                    "device_type": r[2] or "unknown",
+                    "last_seen": r[3].isoformat() if r[3] else None
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        print(f"[v1/devices] Error: {exc}")
+        return []
+    finally:
+        put_conn(conn)
